@@ -483,7 +483,13 @@ export default function App() {
     } catch(e) { setLoadErr(e.message); }
 
     const customs = sessionCustoms.map(c => ({ ...c, category }));
-    const all = [...fetched, ...customs];
+
+    // Inject starred items of this category that aren't already in the fetched list
+    const starredForCategory = starred
+      .filter(s => s.category === category && !fetched.find(f => f.id === s.id))
+      .map(s => ({ ...s, fromStarred: true }));
+
+    const all = [...starredForCategory, ...fetched, ...customs];
     setOptions(all);
 
     const code = Math.random().toString(36).substr(2, 6).toUpperCase();
@@ -564,6 +570,17 @@ export default function App() {
 
     if (done) setScreen("waiting");
     else setCardIndex(nextIndex);
+  };
+
+  // ── Skip remaining ────────────────────────────────────────────────────────
+  const handleSkipRemaining = async () => {
+    if (fbReady && _db && roomCode) {
+      await _fsUpdateDoc(_fsDoc(_db, "rooms", roomCode), {
+        [`members.${userId.current}.voteCount`]: options.length,
+        [`members.${userId.current}.done`]: true,
+      });
+    }
+    setScreen("waiting");
   };
 
   // ── Stars ─────────────────────────────────────────────────────────────────
@@ -710,11 +727,11 @@ export default function App() {
                   ))}
                 </div>
               )}
-              {savedCustoms.length > 0 && (
+              {savedCustoms.filter(o => o.category === category).length > 0 && (
                 <div>
                   <div className="label" style={{ marginBottom: 6 }}>Load saved options</div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                    {savedCustoms.map(o => (
+                    {savedCustoms.filter(o => o.category === category).map(o => (
                       <span key={o.id} className={`pill ${loadedCustomIds.includes(o.id)?"gold-on":""}`} onClick={() => toggleLoadSaved(o)}>
                         {loadedCustomIds.includes(o.id) ? "✓ " : ""}{o.name}
                       </span>
@@ -811,6 +828,8 @@ export default function App() {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <PicktLogo size={20} />
               <span className="pill">{cardIndex + 1} / {options.length}</span>
+              <button className="btn btn-secondary btn-sm" style={{ fontSize: 12, padding: "7px 12px" }}
+                onClick={handleSkipRemaining}>Skip remaining →</button>
             </div>
             <div className="prog-wrap"><div className="prog-bar" style={{ width: `${(cardIndex / options.length) * 100}%` }} /></div>
             <div style={{ flex: 1, position: "relative" }}>

@@ -52,7 +52,7 @@ export default async function handler(req, res) {
     }
 
     // Shape results — only send what the app needs
-    const results = data.results.slice(0, 12).map(m => ({
+    const results = data.results.slice(0, 20).map(m => ({
       id: `tmdb_${m.id}`,
       name: m.title,
       year: m.release_date?.slice(0, 4) || null,
