@@ -36,21 +36,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Debug env vars
-        run: |
-          echo "VITE_BASE_PATH=$VITE_BASE_PATH"
-          echo "VITE_API_BASE=$VITE_API_BASE"
-        env:
-          VITE_API_BASE: ${{ vars.VITE_API_BASE }}
-          VITE_BASE_PATH: /${{ github.event.repository.name }}/
-
       - name: Build
         run: npm run build
         env:
+          # Point API calls to your Vercel deployment.
+          # Set VITE_API_BASE as a GitHub Actions variable (repo Settings → Secrets and variables → Actions → Variables):
+          #   Name: VITE_API_BASE  |  Value: https://your-stable-vercel-url.vercel.app
           VITE_API_BASE: ${{ vars.VITE_API_BASE }}
-          # Automatically set the base path from the repo name — no manual variable needed.
-          # e.g. for github.com/ayleeandersen/pickt this becomes /pickt/
+          # Base path is automatically derived from the repo name (e.g. /pickt/)
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
+
 
 
       - name: Upload Pages artifact
