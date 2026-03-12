@@ -9,7 +9,6 @@ import { useState, useEffect, useRef, useCallback } from "react";
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyBPOFutCgZE0AFLmfRXL-hSHxUf3vFb_AQ",
   authDomain: "pickt-6ca82.firebaseapp.com",
-  databaseURL: "https://pickt-6ca82-default-rtdb.firebaseio.com",
   projectId: "pickt-6ca82",
   storageBucket: "pickt-6ca82.firebasestorage.app",
   messagingSenderId: "155462045470",
@@ -18,21 +17,22 @@ const FIREBASE_CONFIG = {
 };
 
 let _db = null;
-let _fbRef = null;
-let _fbSet = null;
-let _fbOnValue = null;
-let _fbOff = null;
-let _fbUpdate = null;
+let _fsDoc = null;
+let _fsSetDoc = null;
+let _fsUpdateDoc = null;
+let _fsOnSnapshot = null;
+let _fsGetDoc = null;
 
 async function initFirebase() {
   if (_db) return _db;
   try {
     const { initializeApp, getApps } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
-    const { getDatabase, ref, set, onValue, off, update } =
-      await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js");
+    const { getFirestore, doc, setDoc, updateDoc, onSnapshot, getDoc } =
+      await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
     const app = getApps().length ? getApps()[0] : initializeApp(FIREBASE_CONFIG);
-    _db = getDatabase(app);
-    _fbRef = ref; _fbSet = set; _fbOnValue = onValue; _fbOff = off; _fbUpdate = update;
+    _db = getFirestore(app);
+    _fsDoc = doc; _fsSetDoc = setDoc; _fsUpdateDoc = updateDoc;
+    _fsOnSnapshot = onSnapshot; _fsGetDoc = getDoc;
     return _db;
   } catch (e) {
     console.error("Firebase init failed:", e);
@@ -70,6 +70,9 @@ const RADIUS_OPTIONS = [
   { value: 5000, label: "5 km" }, { value: 10000, label: "10 km" },
   { value: 25000, label: "25 km" },
 ];
+
+// Base URL for API calls — empty on Vercel (relative), set to Vercel deployment URL on GitHub Pages
+const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 const ls = {
   get: (k, fb = null) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return fb; } },
@@ -390,11 +393,11 @@ export default function App() {
   // Subscribe to room once roomCode is set
   useEffect(() => {
     if (!roomCode || !fbReady || !_db) return;
-    const path = `rooms/${roomCode}`;
-    roomRef.current = _fbRef(_db, path);
+    const roomDocRef = _fsDoc(_db, "rooms", roomCode);
+    roomRef.current = roomDocRef;
 
-    const unsubscribe = _fbOnValue(roomRef.current, snapshot => {
-      const data = snapshot.val();
+    const unsubscribe = _fsOnSnapshot(roomDocRef, snapshot => {
+      const data = snapshot.data();
       if (!data) return;
 
       // Update members
@@ -425,7 +428,7 @@ export default function App() {
       }
     });
 
-    return () => { if (roomRef.current) _fbOff(roomRef.current); };
+    return () => unsubscribe();
   }, [roomCode, fbReady]);
 
   // ── API fetchers (call Vercel proxy functions — keys stay server-side) ───────
@@ -438,13 +441,13 @@ export default function App() {
         : rej("Geolocation not supported")
     );
     const params = new URLSearchParams({ lat: loc.lat, lng: loc.lng, radius });
-    const r = await fetch(`/api/restaurants?${params}`);
+    const r = await fetch(`${API_BASE}/api/restaurants?${params}`);
     const d = await r.json();
     if (d.error) throw new Error(d.error);
     if (!d.results?.length) throw new Error("No restaurants found — try a larger radius");
     return d.results.map(p => ({
       id: p.id, name: p.name, emoji: "🍽️",
-      image: p.photoRef ? `/api/place-photo?ref=${encodeURIComponent(p.photoRef)}&maxwidth=400` : null,
+      image: p.photoRef ? `${API_BASE}/api/place-photo?ref=${encodeURIComponent(p.photoRef)}&maxwidth=400` : null,
       detail: `${p.vicinity} · ${p.rating ? p.rating + "★" : "No rating"}`,
       tags: [p.priceLevel ? "$".repeat(p.priceLevel) : "$$", ...(p.types?.slice(0,2).map(t=>t.replace(/_/g," ")) || [])],
       category: "food",
@@ -456,7 +459,7 @@ export default function App() {
       ratings: ratings.join("|"),
       ...(platforms.length ? { providers: platforms.join("|") } : {}),
     });
-    const r = await fetch(`/api/movies?${params}`);
+    const r = await fetch(`${API_BASE}/api/movies?${params}`);
     const d = await r.json();
     if (d.error) throw new Error(d.error);
     if (!d.results?.length) throw new Error("No movies found — try different filters");
@@ -492,10 +495,10 @@ export default function App() {
     setAllDone(false);
     setCardIndex(0);
 
-    // Write room to Firebase
+    // Write room to Firestore
     const db = await initFirebase();
     if (db) {
-      await _fbSet(_fbRef(db, `rooms/${code}`), {
+      await _fsSetDoc(_fsDoc(db, "rooms", code), {
         createdAt: Date.now(),
         category,
         options: all,
@@ -525,14 +528,16 @@ export default function App() {
     setAllDone(false);
     setCardIndex(0);
 
-    // Register as member
+    // Register as member in Firestore
     const db = await initFirebase();
     if (db) {
-      await _fbUpdate(_fbRef(db, `rooms/${code}/members/${userId.current}`), {
-        name: userName || "Guest",
-        done: false,
-        voteCount: 0,
-        votes: {},
+      await _fsUpdateDoc(_fsDoc(db, "rooms", code), {
+        [`members.${userId.current}`]: {
+          name: userName || "Guest",
+          done: false,
+          voteCount: 0,
+          votes: {},
+        },
       });
     }
     setScreen("lobby");
@@ -548,12 +553,12 @@ export default function App() {
     const nextIndex = cardIndex + 1;
     const done = nextIndex >= options.length;
 
-    // Write vote to Firebase
+    // Write vote to Firestore
     if (fbReady && _db && roomCode) {
-      await _fbUpdate(_fbRef(_db, `rooms/${roomCode}/members/${userId.current}`), {
-        votes: newVotes,
-        voteCount: nextIndex,
-        done,
+      await _fsUpdateDoc(_fsDoc(_db, "rooms", roomCode), {
+        [`members.${userId.current}.votes`]: newVotes,
+        [`members.${userId.current}.voteCount`]: nextIndex,
+        [`members.${userId.current}.done`]: done,
       });
     }
 
