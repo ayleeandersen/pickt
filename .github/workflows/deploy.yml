@@ -45,6 +45,9 @@ jobs:
           #   Name: VITE_API_BASE
           #   Value: https://your-app.vercel.app   (no trailing slash)
           VITE_API_BASE: ${{ vars.VITE_API_BASE }}
+          # GitHub Pages serves from /{repo-name}/ — set this to match your repo name.
+          # e.g. if your repo is github.com/aylee/pickt, set this to /pickt/
+          VITE_BASE_PATH: ${{ vars.VITE_BASE_PATH }}
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
