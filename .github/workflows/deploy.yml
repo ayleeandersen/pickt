@@ -36,18 +36,22 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Debug env vars
+        run: |
+          echo "VITE_BASE_PATH=$VITE_BASE_PATH"
+          echo "VITE_API_BASE=$VITE_API_BASE"
+        env:
+          VITE_API_BASE: ${{ vars.VITE_API_BASE }}
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+
       - name: Build
         run: npm run build
         env:
-          # Point API calls at your Vercel deployment.
-          # Set VITE_API_BASE as a GitHub Actions secret/variable in your repo settings:
-          #   Settings → Secrets and variables → Actions → Variables → New repository variable
-          #   Name: VITE_API_BASE
-          #   Value: https://your-app.vercel.app   (no trailing slash)
           VITE_API_BASE: ${{ vars.VITE_API_BASE }}
-          # GitHub Pages serves from /{repo-name}/ — set this to match your repo name.
-          # e.g. if your repo is github.com/aylee/pickt, set this to /pickt/
-          VITE_BASE_PATH: ${{ vars.VITE_BASE_PATH }}
+          # Automatically set the base path from the repo name — no manual variable needed.
+          # e.g. for github.com/ayleeandersen/pickt this becomes /pickt/
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
