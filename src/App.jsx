@@ -22,17 +22,24 @@ let _fsSetDoc = null;
 let _fsUpdateDoc = null;
 let _fsOnSnapshot = null;
 let _fsGetDoc = null;
+let _fsCollection = null;
+let _fsQuery = null;
+let _fsWhere = null;
+let _fsGetDocs = null;
+let _fsDeleteDoc = null;
 
 async function initFirebase() {
   if (_db) return _db;
   try {
     const { initializeApp, getApps } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
-    const { getFirestore, doc, setDoc, updateDoc, onSnapshot, getDoc } =
+    const { getFirestore, doc, setDoc, updateDoc, onSnapshot, getDoc, collection, query, where, getDocs, deleteDoc } =
       await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
     const app = getApps().length ? getApps()[0] : initializeApp(FIREBASE_CONFIG);
     _db = getFirestore(app);
     _fsDoc = doc; _fsSetDoc = setDoc; _fsUpdateDoc = updateDoc;
     _fsOnSnapshot = onSnapshot; _fsGetDoc = getDoc;
+    _fsCollection = collection; _fsQuery = query; _fsWhere = where;
+    _fsGetDocs = getDocs; _fsDeleteDoc = deleteDoc;
     return _db;
   } catch (e) {
     console.error("Firebase init failed:", e);
@@ -121,7 +128,7 @@ body{height:100%;background:${T.bg};color:${T.text};font-family:'DM Sans',sans-s
 .swipe-card:active{cursor:grabbing;}
 .swipe-card.back1{transform:scale(.95) translateY(12px);filter:brightness(.65);pointer-events:none;z-index:0;}
 .swipe-card.back2{transform:scale(.90) translateY(24px);filter:brightness(.4);pointer-events:none;z-index:-1;}
-.card-img{width:100%;height:180px;object-fit:cover;flex-shrink:0;}
+.card-img{width:100%;height:380px;object-fit:cover;object-position:top;flex-shrink:0;background:${T.faint};}
 .card-body{display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px 20px 20px;text-align:center;flex:1;justify-content:center;}
 .card-emoji{font-size:52px;line-height:1;}
 .card-name{font-family:'Syne',sans-serif;font-size:21px;font-weight:800;line-height:1.2;}
@@ -433,7 +440,10 @@ export default function App() {
       }
 
       // Host ended round for everyone
-      if (data.roundEnded) setRoundEnded(true);
+      if (data.roundEnded) {
+        setRoundEnded(true);
+        // We handle the screen transition in a separate useEffect to avoid stale state issues
+      }
 
       // Sync options list; always accept if incoming is longer
       if (data.options) {
@@ -443,6 +453,26 @@ export default function App() {
 
     return () => unsubscribe();
   }, [roomCode, fbReady]);
+
+  // Handle forced end of round
+  useEffect(() => {
+    if (roundEnded && (screen === "swipe" || screen === "lobby" || screen === "more")) {
+      setScreen("waiting");
+    }
+  }, [roundEnded, screen]);
+
+  // Passive database cleanup (deletes rooms > 1hr old when a new room is created)
+  const cleanupOldRooms = async (db) => {
+    if (!_fsQuery || !_fsCollection || !_fsGetDocs || !_fsDeleteDoc) return;
+    try {
+      const oneHourAgo = Date.now() - 3600000;
+      const q = _fsQuery(_fsCollection(db, "rooms"), _fsWhere("createdAt", "<", oneHourAgo));
+      const snapshot = await _fsGetDocs(q);
+      snapshot.forEach(docSnap => {
+        _fsDeleteDoc(docSnap.ref);
+      });
+    } catch (e) { console.warn("Cleanup failed:", e); }
+  };
 
   // ── API fetchers (call Vercel proxy functions — keys stay server-side) ───────
   const fetchRestaurants = async (pagetoken = "") => {
@@ -503,6 +533,10 @@ export default function App() {
       // "custom" category: no API fetch — user-supplied items only
     } catch(e) { setLoadErr(e.message); }
 
+    // Passive cleanup
+    const db = await initFirebase();
+    if (db) cleanupOldRooms(db);
+
     const customs = sessionCustoms.map(c => ({ ...c, category }));
 
     // Inject starred items of this category that aren't already in the fetched list
@@ -524,12 +558,12 @@ export default function App() {
     setCardIndex(0);
 
     // Write room to Firestore
-    const db = await initFirebase();
     if (db) {
       await _fsSetDoc(_fsDoc(db, "rooms", code), {
         createdAt: Date.now(),
         category,
         options: all,
+        roundEnded: false, // Explicitly init roundEnded flag
         members: {
           [userId.current]: {
             name: userName || "Host",
@@ -1103,10 +1137,10 @@ export default function App() {
 
             <div style={{ flex: 1 }} />
             <button
-              className={`btn ${allDone ? "btn-primary pop-in" : "btn-secondary"}`}
+              className={`btn ${(allDone || roundEnded) ? "btn-primary pop-in" : "btn-secondary"}`}
               onClick={() => setScreen("results")}
             >
-              {allDone ? "🎊 Everyone's done — See Results!" : "See Results Early →"}
+              {(allDone || roundEnded) ? "🎊 Everyone's done — See Results!" : "See Results Early →"}
             </button>
             {role === "host" && (
               <button className="btn btn-secondary" onClick={handleEndRound}>🏁 End round for everyone</button>
