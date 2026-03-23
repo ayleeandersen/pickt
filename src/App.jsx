@@ -84,11 +84,12 @@ const FONT_URL = "https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800
 const CSS = `
 @import url('${FONT_URL}');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-html,body{height:100%;overflow:hidden;}
-body{background:${T.bg};color:${T.text};font-family:'DM Sans',sans-serif;-webkit-font-smoothing:antialiased;}
-.app{max-width:430px;margin:0 auto;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
-.screen{flex:1;display:flex;flex-direction:column;padding:20px 18px 28px;gap:16px;overflow-y:auto;scrollbar-width:none;}
+html{height:100%;}
+body{height:100%;background:${T.bg};color:${T.text};font-family:'DM Sans',sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden;}
+.app{max-width:430px;margin:0 auto;height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden;}
+.screen{flex:1;display:flex;flex-direction:column;padding:20px 18px env(safe-area-inset-bottom,24px);gap:16px;overflow-y:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;}
 .screen::-webkit-scrollbar{display:none;}
+.screen-swipe{padding-bottom:max(env(safe-area-inset-bottom,16px),16px);}
 .logo{font-family:'Syne',sans-serif;font-size:26px;font-weight:800;letter-spacing:-1px;}
 .logo em{color:${T.accent};font-style:normal;}
 .tagline{color:${T.muted};font-size:13px;font-weight:300;}
@@ -353,16 +354,19 @@ export default function App() {
   const [role,     setRole]     = useState(null);
   const [roomCode, setRoomCode] = useState("");
   const [joinCode, setJoinCode] = useState("");
+  // (nearby feature removed — was a non-functional placeholder)
   const [category, setCategory] = useState("food");
+  const [itemCount, setItemCount] = useState(20); // how many API items to pull
   const [options,  setOptions]  = useState([]);
   const [cardIndex,setCardIndex]= useState(0);
+  const [voteHistory, setVoteHistory] = useState([]); // [{optId, vote}] for undo
   const [myVotes,  setMyVotes]  = useState({});   // this user's votes { optId: 0|1 }
   const [sessionCustoms,   setSessionCustoms]   = useState([]);
   const [loadedCustomIds,  setLoadedCustomIds]  = useState([]);
   const [customInput,      setCustomInput]      = useState("");
   const [loading,  setLoading]  = useState(false);
   const [loadErr,  setLoadErr]  = useState("");
-  const [nearby,   setNearby]   = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // Firebase / sync state
   const [roomMembers,  setRoomMembers]  = useState({});  // { uid: { name, done, voteCount } }
@@ -379,10 +383,7 @@ export default function App() {
 
   const saveRadius = r => { setRadius(r); ls.set("gs_radius", r); };
 
-  // Nearby simulation
-  useEffect(() => {
-    if (screen === "home") { const t = setTimeout(() => setNearby(true), 2500); return () => clearTimeout(t); }
-  }, [screen]);
+
 
   // ── Firebase helpers ──────────────────────────────────────────────────────
   // Auto-init Firebase on mount
@@ -424,6 +425,9 @@ export default function App() {
 
       // Sync options list to joining members (host writes, guests read)
       if (data.options && options.length === 0) {
+        setOptions(data.options);
+      } else if (data.options && data.options.length > options.length) {
+        // More items were added (e.g. custom items from another member)
         setOptions(data.options);
       }
     });
@@ -473,13 +477,13 @@ export default function App() {
 
   // ── Session start ─────────────────────────────────────────────────────────
   const startSession = async () => {
-    
     setLoading(true); setLoadErr("");
 
     let fetched = [];
     try {
       if (category === "food") fetched = await fetchRestaurants();
       else if (category === "movies") fetched = await fetchMovies();
+      // "custom" category: no API fetch — user-supplied items only
     } catch(e) { setLoadErr(e.message); }
 
     const customs = sessionCustoms.map(c => ({ ...c, category }));
@@ -491,6 +495,7 @@ export default function App() {
 
     const all = [...starredForCategory, ...fetched, ...customs];
     setOptions(all);
+    setVoteHistory([]);
 
     const code = Math.random().toString(36).substr(2, 6).toUpperCase();
     setRoomCode(code);
@@ -521,6 +526,25 @@ export default function App() {
 
     setLoading(false);
     setScreen("lobby");
+  };
+
+  // ── Load more items (host only) ────────────────────────────────────────────
+  const handleLoadMore = async () => {
+    setLoadingMore(true);
+    let fetched = [];
+    try {
+      if (category === "food") fetched = await fetchRestaurants();
+      else if (category === "movies") fetched = await fetchMovies();
+    } catch(e) { setLoadingMore(false); return; }
+    // Append only genuinely new items
+    const newItems = fetched.filter(f => !options.find(o => o.id === f.id));
+    const updated = [...options, ...newItems];
+    setOptions(updated);
+    // Persist updated list to Firestore so guests see them too
+    if (fbReady && _db && roomCode) {
+      await _fsUpdateDoc(_fsDoc(_db, "rooms", roomCode), { options: updated });
+    }
+    setLoadingMore(false);
   };
 
   const joinSession = async () => {
@@ -555,6 +579,7 @@ export default function App() {
     const vote = dir === "yes" ? 1 : 0;
     const newVotes = { ...myVotes, [opt.id]: vote };
     setMyVotes(newVotes);
+    setVoteHistory(h => [...h, { optId: opt.id, prevVote: myVotes[opt.id] }]);
 
     const nextIndex = cardIndex + 1;
     const done = nextIndex >= options.length;
@@ -570,6 +595,27 @@ export default function App() {
 
     if (done) setScreen("waiting");
     else setCardIndex(nextIndex);
+  };
+
+  // ── Undo last vote ────────────────────────────────────────────────────────
+  const handleUndo = async () => {
+    if (voteHistory.length === 0 || cardIndex === 0) return;
+    const last = voteHistory[voteHistory.length - 1];
+    const newHistory = voteHistory.slice(0, -1);
+    const newVotes = { ...myVotes };
+    if (last.prevVote === undefined) delete newVotes[last.optId];
+    else newVotes[last.optId] = last.prevVote;
+    const prevIndex = cardIndex - 1;
+    setVoteHistory(newHistory);
+    setMyVotes(newVotes);
+    setCardIndex(prevIndex);
+    if (fbReady && _db && roomCode) {
+      await _fsUpdateDoc(_fsDoc(_db, "rooms", roomCode), {
+        [`members.${userId.current}.votes`]: newVotes,
+        [`members.${userId.current}.voteCount`]: prevIndex,
+        [`members.${userId.current}.done`]: false,
+      });
+    }
   };
 
   // ── Skip remaining ────────────────────────────────────────────────────────
@@ -592,10 +638,25 @@ export default function App() {
   // ── Custom options ────────────────────────────────────────────────────────
   const addCustom = () => {
     if (!customInput.trim()) return;
-    const opt = { id: `custom_${Date.now()}`, name: customInput.trim(), emoji: category==="food"?"🍽️":"🎬", detail:"Custom option", tags:["Custom"], category };
+    const catEmoji = category==="food"?"🍽️":category==="movies"?"🎬":"✨";
+    const opt = { id: `custom_${Date.now()}`, name: customInput.trim(), emoji: catEmoji, detail:"Custom option", tags:["Custom"], category };
     setSessionCustoms(c => [...c, opt]);
     setCustomInput("");
   };
+
+  // Add a custom item mid-session and sync to all members via Firestore
+  const addCustomDuringSession = async () => {
+    if (!customInput.trim()) return;
+    const catEmoji = category==="food"?"🍽️":category==="movies"?"🎬":"✨";
+    const opt = { id: `custom_${Date.now()}`, name: customInput.trim(), emoji: catEmoji, detail:"Added by member", tags:["Custom"], category };
+    const updated = [...options, opt];
+    setOptions(updated);
+    setCustomInput("");
+    if (fbReady && _db && roomCode) {
+      await _fsUpdateDoc(_fsDoc(_db, "rooms", roomCode), { options: updated });
+    }
+  };
+
   const saveCustom = opt => setSavedCustoms(prev => prev.find(o=>o.name===opt.name) ? prev : [opt,...prev]);
   const toggleLoadSaved = opt => {
     if (loadedCustomIds.includes(opt.id)) {
@@ -621,6 +682,16 @@ export default function App() {
     setMyVotes({}); setGroupVotes({}); setRoomMembers({});
     setRoomCode(""); setJoinCode(""); setAllDone(false);
     setSessionCustoms([]); setLoadedCustomIds([]);
+    setVoteHistory([]);
+  };
+
+  // Leave mid-session without resetting room data for others
+  const leaveSession = () => {
+    setScreen("home"); setOptions([]); setCardIndex(0);
+    setMyVotes({}); setGroupVotes({}); setRoomMembers({});
+    setRoomCode(""); setJoinCode(""); setAllDone(false);
+    setSessionCustoms([]); setLoadedCustomIds([]);
+    setVoteHistory([]);
   };
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -636,9 +707,6 @@ export default function App() {
               <PicktLogo size={32} />
               <div className="tagline" style={{ marginTop: 6 }}>stop arguing. start swiping.</div>
             </div>
-            {nearby && (
-              <div className="nearby-bar fade-up"><div className="pulse" /><span>2 people nearby — tap <strong>Join</strong></span></div>
-            )}
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
               <div style={{ fontSize: 84, filter: "drop-shadow(0 8px 32px rgba(255,95,109,.35))", lineHeight: 1, textAlign: "center" }}>🍕🎬</div>
             </div>
@@ -669,11 +737,26 @@ export default function App() {
               <div className="tabs">
                 <button className={`tab ${category==="food"?"on":""}`} onClick={() => setCategory("food")}>🍽️ Food</button>
                 <button className={`tab ${category==="movies"?"on":""}`} onClick={() => setCategory("movies")}>🎬 Movies</button>
+                <button className={`tab ${category==="custom"?"on":""}`} onClick={() => setCategory("custom")}>✏️ Build Your Own</button>
               </div>
+              {category === "custom" && (
+                <div className="warn" style={{ fontSize: 12 }}>✨ No API needed — you'll add your own items below. Everyone in the room votes on your list!</div>
+              )}
             </div>
 
+            {(category === "food" || category === "movies") && (
+              <div className="surface-card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <div className="label">How many options to pull?</div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {[10, 20, 30, 50].map(n => (
+                    <span key={n} className={`pill ${itemCount === n ? "on" : ""}`} onClick={() => setItemCount(n)}>{n}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {category === "food" && (
-              <div className="surface-card" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div className="surface-card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <div className="label">Search radius</div>
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                   {RADIUS_OPTIONS.map(r => (
@@ -743,9 +826,12 @@ export default function App() {
 
             {loadErr && <div className="err">{loadErr}</div>}
             <div style={{ flex: 1 }} />
-            <button className="btn btn-primary" onClick={startSession} disabled={loading}>
-              {loading ? "Loading options…" : "Create Room →"}
+            <button className="btn btn-primary" onClick={startSession} disabled={loading || (category === "custom" && sessionCustoms.length === 0)}>
+              {loading ? "Loading options…" : category === "custom" ? "Let's make a decision! →" : "Create Room →"}
             </button>
+            {category === "custom" && sessionCustoms.length === 0 && (
+              <div style={{ color: T.muted, fontSize: 12, textAlign: "center" }}>Add at least one item above to get started</div>
+            )}
             {loading && <div className="spinner" style={{ marginTop: -8 }} />}
           </div>
         )}
@@ -755,16 +841,6 @@ export default function App() {
           <div className="screen fade-up">
             <button className="nav-back" onClick={() => setScreen("home")}>←</button>
             <div><div className="logo">join room</div><div className="tagline" style={{ marginTop: 4 }}>enter your friend's code</div></div>
-            {nearby && (
-              <div>
-                <div className="label" style={{ marginBottom: 8 }}>Nearby rooms</div>
-                <div className="result-row" style={{ cursor: "pointer" }} onClick={() => setJoinCode("AB12XY")}>
-                  <span style={{ fontSize: 24 }}>📡</span>
-                  <div style={{ flex: 1 }}><div style={{ fontWeight: 600, fontSize: 14 }}>Alex's Room</div><div style={{ color: T.muted, fontSize: 12 }}>Food · nearby</div></div>
-                  <div style={{ fontFamily: "Syne", fontWeight: 800, color: T.gold, letterSpacing: 3, fontSize: 15 }}>AB12XY</div>
-                </div>
-              </div>
-            )}
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <div className="label">Room code</div>
               <input className="input" placeholder="XXXXXX" value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())}
@@ -777,7 +853,7 @@ export default function App() {
             {loadErr && <div className="err">{loadErr}</div>}
             <div style={{ flex: 1 }} />
             <button className="btn btn-primary" onClick={joinSession} disabled={joinCode.length < 4}>
-              "Join Room →"
+              Join Room →
             </button>
           </div>
         )}
@@ -807,7 +883,7 @@ export default function App() {
             <div>
               <div className="label" style={{ marginBottom: 8 }}>Session</div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <span className="pill">{category==="food"?"🍽️ Food":"🎬 Movies"}</span>
+                <span className="pill">{category==="food"?"🍽️ Food":category==="movies"?"🎬 Movies":"✨ Custom"}</span>
                 <span className="pill">{options.length} options</span>
                 {category==="food" && <span className="pill">{RADIUS_OPTIONS.find(r=>r.value===radius)?.label}</span>}
               </div>
@@ -815,16 +891,27 @@ export default function App() {
             {options.length === 0 && !loading && (
               <div className="warn">No options loaded. Add custom options or check API keys in Settings.</div>
             )}
+            {/* Any member can suggest items that sync to everyone */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="label">Suggest an item for the group</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input className="input" style={{ flex: 1 }} placeholder="Add to everyone's list…"
+                  value={customInput} onChange={e => setCustomInput(e.target.value)}
+                  onKeyDown={e => e.key==="Enter" && addCustomDuringSession()} />
+                <button className="btn btn-primary btn-sm" style={{ width: 46, padding: 0, fontSize: 22 }} onClick={addCustomDuringSession}>+</button>
+              </div>
+              <div style={{ color: T.muted, fontSize: 12 }}>Items you add here will appear on everyone's swipe deck 🎉</div>
+            </div>
             <div style={{ flex: 1 }} />
             <button className="btn btn-primary" onClick={() => setScreen("swipe")} disabled={options.length === 0}>
-              {role==="host" ? "Start Swiping →" : "I'm Ready →"}
+              {role==="host" ? "Let's make a decision! →" : "I'm Ready →"}
             </button>
           </div>
         )}
 
         {/* ══ SWIPE ═════════════════════════════════════════════════════════ */}
         {screen === "swipe" && (
-          <div className="screen fade-up" style={{ gap: 10 }}>
+          <div className="screen fade-up" style={{ gap: 10, overflow: "hidden", paddingBottom: "max(env(safe-area-inset-bottom, 16px), 16px)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <PicktLogo size={20} />
               <span className="pill">{cardIndex + 1} / {options.length}</span>
@@ -832,7 +919,7 @@ export default function App() {
                 onClick={handleSkipRemaining}>Skip remaining →</button>
             </div>
             <div className="prog-wrap"><div className="prog-bar" style={{ width: `${(cardIndex / options.length) * 100}%` }} /></div>
-            <div style={{ flex: 1, position: "relative" }}>
+            <div style={{ flex: 1, position: "relative", minHeight: 0 }}>
               <div className="card-stack">
                 {[0,1,2].map(off => {
                   const idx = cardIndex + off;
@@ -847,6 +934,18 @@ export default function App() {
               <button className="action-btn nope" onClick={() => handleVote("no")}>✗</button>
               <button className="action-btn star" onClick={() => options[cardIndex] && toggleStar(options[cardIndex])}>{isStarred(options[cardIndex])?"⭐":"☆"}</button>
               <button className="action-btn yep"  onClick={() => handleVote("yes")}>✓</button>
+            </div>
+            {/* Undo + Leave row */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 2 }}>
+              <button
+                onClick={handleUndo}
+                disabled={voteHistory.length === 0}
+                style={{ background: "none", border: `1.5px solid ${voteHistory.length > 0 ? T.border : T.faint}`, borderRadius: 10, padding: "7px 14px", color: voteHistory.length > 0 ? T.muted : T.faint, fontSize: 13, cursor: voteHistory.length > 0 ? "pointer" : "not-allowed", fontFamily: "'DM Sans',sans-serif", transition: "all .2s" }}
+              >↩ Undo</button>
+              <button
+                onClick={leaveSession}
+                style={{ background: "none", border: "none", color: T.muted, fontSize: 13, cursor: "pointer", fontFamily: "'DM Sans',sans-serif", opacity: 0.7 }}
+              >🚪 Leave</button>
             </div>
           </div>
         )}
@@ -911,12 +1010,24 @@ export default function App() {
             )}
 
             <div style={{ flex: 1 }} />
+            {/* Load More — only for host on API-backed categories */}
+            {role === "host" && category !== "custom" && (
+              <button
+                className="btn btn-secondary"
+                onClick={handleLoadMore}
+                disabled={loadingMore}
+                style={{ marginBottom: 4 }}
+              >
+                {loadingMore ? "Loading more…" : "🔄 Load More Options"}
+              </button>
+            )}
             <button
               className={`btn ${allDone ? "btn-primary pop-in" : "btn-secondary"}`}
               onClick={() => setScreen("results")}
             >
               {allDone ? "🎊 Everyone's done — See Results!" : "See Results Early →"}
             </button>
+            <button onClick={leaveSession} style={{ background: "none", border: "none", color: T.muted, fontSize: 13, cursor: "pointer", textAlign: "center", paddingBottom: 4 }}>🚪 Leave decision</button>
           </div>
         )}
 
@@ -959,7 +1070,7 @@ export default function App() {
 
             <div style={{ display: "flex", gap: 8 }}>
               <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setScreen("starred")}>⭐ Starred</button>
-              <button className="btn btn-primary" style={{ flex: 1 }} onClick={resetSession}>New Round</button>
+              <button className="btn btn-primary" style={{ flex: 1 }} onClick={resetSession}>New Decision ✨</button>
             </div>
           </div>
         )}
