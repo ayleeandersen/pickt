@@ -356,14 +356,17 @@ export default function App() {
   const [joinCode, setJoinCode] = useState("");
   // (nearby feature removed — was a non-functional placeholder)
   const [category, setCategory] = useState("food");
-  const [itemCount, setItemCount] = useState(20); // how many API items to pull
+  const [itemCount, setItemCount] = useState(20); // how many API items to pull; -1 = infinite
   const [options,  setOptions]  = useState([]);
+  const optionsRef = useRef([]); // always-current options for async handlers
   const [cardIndex,setCardIndex]= useState(0);
   const [voteHistory, setVoteHistory] = useState([]); // [{optId, vote}] for undo
   const [myVotes,  setMyVotes]  = useState({});   // this user's votes { optId: 0|1 }
   const [sessionCustoms,   setSessionCustoms]   = useState([]);
   const [loadedCustomIds,  setLoadedCustomIds]  = useState([]);
   const [customInput,      setCustomInput]      = useState("");
+  const [swipeCustomInput, setSwipeCustomInput] = useState(""); // mid-swipe add item
+  const [showSwipeAdd,     setShowSwipeAdd]     = useState(false);
   const [loading,  setLoading]  = useState(false);
   const [loadErr,  setLoadErr]  = useState("");
   const [loadingMore, setLoadingMore] = useState(false);
@@ -372,6 +375,7 @@ export default function App() {
   const [roomMembers,  setRoomMembers]  = useState({});  // { uid: { name, done, voteCount } }
   const [groupVotes,   setGroupVotes]   = useState({});  // { optId: totalVotes }
   const [allDone,      setAllDone]      = useState(false);
+  const [roundEnded,   setRoundEnded]   = useState(false); // host force-ended for everyone
   const roomRef = useRef(null);
 
   // Persist prefs
@@ -390,6 +394,9 @@ export default function App() {
   useEffect(() => {
     initFirebase().then(db => { if (db) setFbReady(true); });
   }, []);
+
+  // Keep optionsRef in sync so async handlers always see latest options
+  useEffect(() => { optionsRef.current = options; }, [options]);
 
   // Subscribe to room once roomCode is set
   useEffect(() => {
@@ -423,12 +430,12 @@ export default function App() {
         }
       }
 
-      // Sync options list to joining members (host writes, guests read)
-      if (data.options && options.length === 0) {
-        setOptions(data.options);
-      } else if (data.options && data.options.length > options.length) {
-        // More items were added (e.g. custom items from another member)
-        setOptions(data.options);
+      // Host ended round for everyone
+      if (data.roundEnded) setRoundEnded(true);
+
+      // Sync options list; always accept if incoming is longer
+      if (data.options) {
+        setOptions(prev => data.options.length >= prev.length ? data.options : prev);
       }
     });
 
@@ -529,22 +536,33 @@ export default function App() {
   };
 
   // ── Load more items (host only) ────────────────────────────────────────────
+  // Returns the number of new items added
   const handleLoadMore = async () => {
     setLoadingMore(true);
     let fetched = [];
     try {
       if (category === "food") fetched = await fetchRestaurants();
       else if (category === "movies") fetched = await fetchMovies();
-    } catch(e) { setLoadingMore(false); return; }
-    // Append only genuinely new items
-    const newItems = fetched.filter(f => !options.find(o => o.id === f.id));
-    const updated = [...options, ...newItems];
+    } catch(e) { setLoadingMore(false); return 0; }
+    // Use ref to get truly current options (avoids stale closure)
+    const current = optionsRef.current;
+    const newItems = fetched.filter(f => !current.find(o => o.id === f.id));
+    const updated = [...current, ...newItems];
     setOptions(updated);
-    // Persist updated list to Firestore so guests see them too
     if (fbReady && _db && roomCode) {
       await _fsUpdateDoc(_fsDoc(_db, "rooms", roomCode), { options: updated });
     }
     setLoadingMore(false);
+    return newItems.length;
+  };
+
+  // ── Host: end round for everyone ──────────────────────────────────────────
+  const handleEndRound = async () => {
+    setRoundEnded(true);
+    if (fbReady && _db && roomCode) {
+      await _fsUpdateDoc(_fsDoc(_db, "rooms", roomCode), { roundEnded: true });
+    }
+    setScreen("waiting");
   };
 
   const joinSession = async () => {
@@ -582,7 +600,10 @@ export default function App() {
     setVoteHistory(h => [...h, { optId: opt.id, prevVote: myVotes[opt.id] }]);
 
     const nextIndex = cardIndex + 1;
-    const done = nextIndex >= options.length;
+    const isLast = nextIndex >= options.length;
+    // Infinite mode: host chose "until I say stop" OR round was force-ended externally
+    const goToMore = isLast && itemCount === -1 && category !== "custom" && !roundEnded;
+    const done = isLast && !goToMore;
 
     // Write vote to Firestore
     if (fbReady && _db && roomCode) {
@@ -593,7 +614,8 @@ export default function App() {
       });
     }
 
-    if (done) setScreen("waiting");
+    if (goToMore) setScreen("more");
+    else if (done) setScreen("waiting");
     else setCardIndex(nextIndex);
   };
 
@@ -644,14 +666,17 @@ export default function App() {
     setCustomInput("");
   };
 
-  // Add a custom item mid-session and sync to all members via Firestore
-  const addCustomDuringSession = async () => {
-    if (!customInput.trim()) return;
+  // Add a custom item mid-session (lobby or swipe screen) — syncs to all via Firestore
+  const addCustomDuringSession = async (text) => {
+    const val = (text || customInput).trim();
+    if (!val) return;
     const catEmoji = category==="food"?"🍽️":category==="movies"?"🎬":"✨";
-    const opt = { id: `custom_${Date.now()}`, name: customInput.trim(), emoji: catEmoji, detail:"Added by member", tags:["Custom"], category };
-    const updated = [...options, opt];
+    const opt = { id: `custom_${Date.now()}`, name: val, emoji: catEmoji, detail:"Added by member", tags:["Custom"], category };
+    const current = optionsRef.current;
+    const updated = [...current, opt];
     setOptions(updated);
     setCustomInput("");
+    setSwipeCustomInput("");
     if (fbReady && _db && roomCode) {
       await _fsUpdateDoc(_fsDoc(_db, "rooms", roomCode), { options: updated });
     }
@@ -682,16 +707,15 @@ export default function App() {
     setMyVotes({}); setGroupVotes({}); setRoomMembers({});
     setRoomCode(""); setJoinCode(""); setAllDone(false);
     setSessionCustoms([]); setLoadedCustomIds([]);
-    setVoteHistory([]);
+    setVoteHistory([]); setRoundEnded(false);
   };
 
-  // Leave mid-session without resetting room data for others
   const leaveSession = () => {
     setScreen("home"); setOptions([]); setCardIndex(0);
     setMyVotes({}); setGroupVotes({}); setRoomMembers({});
     setRoomCode(""); setJoinCode(""); setAllDone(false);
     setSessionCustoms([]); setLoadedCustomIds([]);
-    setVoteHistory([]);
+    setVoteHistory([]); setRoundEnded(false);
   };
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -740,7 +764,7 @@ export default function App() {
                 <button className={`tab ${category==="custom"?"on":""}`} onClick={() => setCategory("custom")}>✏️ Build Your Own</button>
               </div>
               {category === "custom" && (
-                <div className="warn" style={{ fontSize: 12 }}>✨ No API needed — you'll add your own items below. Everyone in the room votes on your list!</div>
+                <div className="warn" style={{ fontSize: 12 }}>✨ You'll add your own items below. Everyone in the room votes on your list!</div>
               )}
             </div>
 
@@ -751,7 +775,9 @@ export default function App() {
                   {[10, 20, 30, 50].map(n => (
                     <span key={n} className={`pill ${itemCount === n ? "on" : ""}`} onClick={() => setItemCount(n)}>{n}</span>
                   ))}
+                  <span className={`pill ${itemCount === -1 ? "gold-on" : ""}`} onClick={() => setItemCount(-1)}>♾️ Until I say stop</span>
                 </div>
+                {itemCount === -1 && <div style={{ color: T.muted, fontSize: 12 }}>New cards keep loading after each batch — you control when to end.</div>}
               </div>
             )}
 
@@ -800,13 +826,15 @@ export default function App() {
                 <button className="btn btn-primary btn-sm" style={{ width: 46, padding: 0, fontSize: 22 }} onClick={addCustom}>+</button>
               </div>
               {sessionCustoms.length > 0 && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   {sessionCustoms.map(o => (
-                    <span key={o.id} className="pill on" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                      {o.name}
-                      <span style={{ fontSize: 12, opacity: .7, cursor: "pointer" }} onClick={() => saveCustom(o)} title="Save">💾</span>
-                      <span style={{ opacity: .5, cursor: "pointer" }} onClick={() => setSessionCustoms(c=>c.filter(x=>x.id!==o.id))}>✕</span>
-                    </span>
+                    <div key={o.id} style={{ display: "flex", alignItems: "center", gap: 10, background: T.faint, borderRadius: 12, padding: "10px 14px" }}>
+                      <span style={{ flex: 1, fontSize: 14, fontWeight: 500 }}>{o.emoji} {o.name}</span>
+                      <button style={{ background: T.goldDim, border: `1px solid ${T.gold}`, borderRadius: 8, padding: "5px 10px", color: T.gold, fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}
+                        onClick={() => saveCustom(o)}>💾 Save</button>
+                      <button style={{ background: T.redDim, border: `1px solid ${T.red}`, borderRadius: 8, padding: "5px 10px", color: T.red, fontSize: 12, cursor: "pointer" }}
+                        onClick={() => setSessionCustoms(c => c.filter(x => x.id !== o.id))}>✕</button>
+                    </div>
                   ))}
                 </div>
               )}
@@ -935,18 +963,66 @@ export default function App() {
               <button className="action-btn star" onClick={() => options[cardIndex] && toggleStar(options[cardIndex])}>{isStarred(options[cardIndex])?"⭐":"☆"}</button>
               <button className="action-btn yep"  onClick={() => handleVote("yes")}>✓</button>
             </div>
-            {/* Undo + Leave row */}
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 2 }}>
-              <button
-                onClick={handleUndo}
-                disabled={voteHistory.length === 0}
-                style={{ background: "none", border: `1.5px solid ${voteHistory.length > 0 ? T.border : T.faint}`, borderRadius: 10, padding: "7px 14px", color: voteHistory.length > 0 ? T.muted : T.faint, fontSize: 13, cursor: voteHistory.length > 0 ? "pointer" : "not-allowed", fontFamily: "'DM Sans',sans-serif", transition: "all .2s" }}
-              >↩ Undo</button>
-              <button
-                onClick={leaveSession}
-                style={{ background: "none", border: "none", color: T.muted, fontSize: 13, cursor: "pointer", fontFamily: "'DM Sans',sans-serif", opacity: 0.7 }}
-              >🚪 Leave</button>
+            {/* Mid-swipe add item */}
+            {showSwipeAdd ? (
+              <div style={{ display: "flex", gap: 8, animation: "fadeUp .2s ease both" }}>
+                <input className="input" style={{ flex: 1, fontSize: 14, padding: "10px 13px" }}
+                  placeholder="Add item for everyone…"
+                  value={swipeCustomInput} onChange={e => setSwipeCustomInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") { addCustomDuringSession(swipeCustomInput); setShowSwipeAdd(false); } }}
+                  autoFocus />
+                <button className="btn btn-primary btn-sm" style={{ padding: "0 14px", fontSize: 20 }}
+                  onClick={() => { addCustomDuringSession(swipeCustomInput); setShowSwipeAdd(false); }}>+</button>
+                <button style={{ background: "none", border: "none", color: T.muted, fontSize: 20, cursor: "pointer", padding: "0 4px" }}
+                  onClick={() => setShowSwipeAdd(false)}>✕</button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", paddingTop: 2 }}>
+                <button
+                  onClick={handleUndo}
+                  disabled={voteHistory.length === 0}
+                  style={{ background: "none", border: `1.5px solid ${voteHistory.length > 0 ? T.border : T.faint}`, borderRadius: 10, padding: "7px 14px", color: voteHistory.length > 0 ? T.muted : T.faint, fontSize: 13, cursor: voteHistory.length > 0 ? "pointer" : "not-allowed", fontFamily: "'DM Sans',sans-serif", transition: "all .2s" }}
+                >↩ Undo</button>
+                <button
+                  onClick={() => setShowSwipeAdd(true)}
+                  style={{ background: "none", border: `1.5px solid ${T.border}`, borderRadius: 10, padding: "7px 14px", color: T.muted, fontSize: 13, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}
+                >+ Add item</button>
+                <button
+                  onClick={leaveSession}
+                  style={{ background: "none", border: "none", color: T.muted, fontSize: 13, cursor: "pointer", fontFamily: "'DM Sans',sans-serif", opacity: 0.7 }}
+                >🚪 Leave</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ══ MORE? ══════════════════════════════════════════════════════════ */}
+        {screen === "more" && (
+          <div className="screen fade-up" style={{ justifyContent: "center", gap: 20, textAlign: "center" }}>
+            <div style={{ fontSize: 56 }}>🔄</div>
+            <div>
+              <div style={{ fontFamily: "Syne", fontSize: 22, fontWeight: 800, marginBottom: 8 }}>You've seen everything!</div>
+              <div style={{ color: T.muted, fontSize: 14, lineHeight: 1.6 }}>Want to keep going? Load another batch, or wrap it up and see the results.</div>
             </div>
+            {role === "host" ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
+                <button className="btn btn-primary" onClick={async () => {
+                  const n = await handleLoadMore();
+                  if (n > 0) { setCardIndex(optionsRef.current.length - n); setScreen("swipe"); }
+                  else setScreen("swipe");
+                }} disabled={loadingMore}>
+                  {loadingMore ? "Loading…" : "🔄 Load more options"}
+                </button>
+                <button className="btn btn-secondary" onClick={handleEndRound}>🏁 End for everyone</button>
+                <button style={{ background: "none", border: "none", color: T.muted, fontSize: 13, cursor: "pointer" }} onClick={() => setScreen("results")}>See results early →</button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
+                <div className="warn">Waiting for the host to load more or end the round.</div>
+                <button className="btn btn-secondary" onClick={() => setScreen("waiting")}>Go to waiting room →</button>
+                <button style={{ background: "none", border: "none", color: T.muted, fontSize: 13, cursor: "pointer" }} onClick={() => setScreen("results")}>See results early →</button>
+              </div>
+            )}
           </div>
         )}
 
@@ -1010,23 +1086,15 @@ export default function App() {
             )}
 
             <div style={{ flex: 1 }} />
-            {/* Load More — only for host on API-backed categories */}
-            {role === "host" && category !== "custom" && (
-              <button
-                className="btn btn-secondary"
-                onClick={handleLoadMore}
-                disabled={loadingMore}
-                style={{ marginBottom: 4 }}
-              >
-                {loadingMore ? "Loading more…" : "🔄 Load More Options"}
-              </button>
-            )}
             <button
               className={`btn ${allDone ? "btn-primary pop-in" : "btn-secondary"}`}
               onClick={() => setScreen("results")}
             >
               {allDone ? "🎊 Everyone's done — See Results!" : "See Results Early →"}
             </button>
+            {role === "host" && (
+              <button className="btn btn-secondary" onClick={handleEndRound}>🏁 End round for everyone</button>
+            )}
             <button onClick={leaveSession} style={{ background: "none", border: "none", color: T.muted, fontSize: 13, cursor: "pointer", textAlign: "center", paddingBottom: 4 }}>🚪 Leave decision</button>
           </div>
         )}
