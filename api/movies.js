@@ -20,7 +20,7 @@ export default async function handler(req, res) {
   const {
     ratings = "",       // pipe-separated: "G|PG|PG-13"
     providers = "",     // pipe-separated provider IDs: "8|15|337"
-    page = "1",
+    page = String(Math.ceil(Math.random() * 10)), // random page so each load gives fresh results
   } = req.query;
 
   try {

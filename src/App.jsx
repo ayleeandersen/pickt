@@ -377,6 +377,8 @@ export default function App() {
   const [allDone,      setAllDone]      = useState(false);
   const [roundEnded,   setRoundEnded]   = useState(false); // host force-ended for everyone
   const roomRef = useRef(null);
+  const nextPageTokenRef = useRef(""); // Google Places pagination cursor
+  const moviePageRef = useRef(1);      // TMDB page cursor
 
   // Persist prefs
   useEffect(() => { ls.set("gs_name", userName); }, [userName]);
@@ -443,7 +445,7 @@ export default function App() {
   }, [roomCode, fbReady]);
 
   // ── API fetchers (call Vercel proxy functions — keys stay server-side) ───────
-  const fetchRestaurants = async () => {
+  const fetchRestaurants = async (pagetoken = "") => {
     const loc = await new Promise((res, rej) =>
       navigator.geolocation
         ? navigator.geolocation.getCurrentPosition(
@@ -452,10 +454,13 @@ export default function App() {
         : rej("Geolocation not supported")
     );
     const params = new URLSearchParams({ lat: loc.lat, lng: loc.lng, radius });
+    if (pagetoken) params.set("pagetoken", pagetoken);
     const r = await fetch(`${API_BASE}/api/restaurants?${params}`);
     const d = await r.json();
     if (d.error) throw new Error(d.error);
     if (!d.results?.length) throw new Error("No restaurants found — try a larger radius");
+    // Store the next-page cursor for subsequent Load More calls
+    nextPageTokenRef.current = d.nextPageToken || "";
     return d.results.map(p => ({
       id: p.id, name: p.name, emoji: "🍽️",
       image: p.photoRef ? `${API_BASE}/api/place-photo?ref=${encodeURIComponent(p.photoRef)}&maxwidth=400` : null,
@@ -465,9 +470,11 @@ export default function App() {
     }));
   };
 
-  const fetchMovies = async () => {
+  const fetchMovies = async (page) => {
+    const p = page || (Math.ceil(Math.random() * 10));
     const params = new URLSearchParams({
       ratings: ratings.join("|"),
+      page: String(p),
       ...(platforms.length ? { providers: platforms.join("|") } : {}),
     });
     const r = await fetch(`${API_BASE}/api/movies?${params}`);
@@ -485,11 +492,14 @@ export default function App() {
   // ── Session start ─────────────────────────────────────────────────────────
   const startSession = async () => {
     setLoading(true); setLoadErr("");
+    // Reset pagination cursors for this new session
+    nextPageTokenRef.current = "";
+    moviePageRef.current = 1;
 
     let fetched = [];
     try {
       if (category === "food") fetched = await fetchRestaurants();
-      else if (category === "movies") fetched = await fetchMovies();
+      else if (category === "movies") fetched = await fetchMovies(1);
       // "custom" category: no API fetch — user-supplied items only
     } catch(e) { setLoadErr(e.message); }
 
@@ -541,8 +551,14 @@ export default function App() {
     setLoadingMore(true);
     let fetched = [];
     try {
-      if (category === "food") fetched = await fetchRestaurants();
-      else if (category === "movies") fetched = await fetchMovies();
+      if (category === "food") {
+        // Pass the stored pagetoken so Google returns the next page of results
+        fetched = await fetchRestaurants(nextPageTokenRef.current);
+      } else if (category === "movies") {
+        // Increment the page cursor so TMDB returns a different set
+        moviePageRef.current += 1;
+        fetched = await fetchMovies(moviePageRef.current);
+      }
     } catch(e) { setLoadingMore(false); return 0; }
     // Use ref to get truly current options (avoids stale closure)
     const current = optionsRef.current;
@@ -1136,9 +1152,15 @@ export default function App() {
               ))}
             </div>
 
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setScreen("starred")}>⭐ Starred</button>
-              <button className="btn btn-primary" style={{ flex: 1 }} onClick={resetSession}>New Decision ✨</button>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {/* Back to swiping if cards remain */}
+              {cardIndex < options.length && options.length > 0 && (
+                <button className="btn btn-secondary" onClick={() => setScreen("swipe")}>← Back to swiping</button>
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setScreen("starred")}>⭐ Starred</button>
+                <button className="btn btn-primary" style={{ flex: 1 }} onClick={resetSession}>New Decision ✨</button>
+              </div>
             </div>
           </div>
         )}

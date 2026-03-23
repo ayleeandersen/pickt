@@ -12,7 +12,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
-  const { lat, lng, radius = 5000 } = req.query;
+  const { lat, lng, radius = 5000, pagetoken = "" } = req.query;
 
   if (!lat || !lng) {
     return res.status(400).json({ error: "lat and lng query params are required" });
@@ -25,9 +25,14 @@ export default async function handler(req, res) {
 
   try {
     const url = new URL("https://maps.googleapis.com/maps/api/place/nearbysearch/json");
-    url.searchParams.set("location", `${lat},${lng}`);
-    url.searchParams.set("radius", String(radius));
-    url.searchParams.set("type", "restaurant");
+    if (pagetoken) {
+      // When a pagetoken is provided, only key + pagetoken are needed
+      url.searchParams.set("pagetoken", pagetoken);
+    } else {
+      url.searchParams.set("location", `${lat},${lng}`);
+      url.searchParams.set("radius", String(radius));
+      url.searchParams.set("type", "restaurant");
+    }
     url.searchParams.set("key", key);
 
     const response = await fetch(url.toString());
@@ -42,7 +47,7 @@ export default async function handler(req, res) {
     }
 
     // Shape the results — only send what the app needs, no raw key exposure
-    const results = data.results.slice(0, 12).map(place => ({
+    const results = data.results.slice(0, 20).map(place => ({
       id: place.place_id,
       name: place.name,
       vicinity: place.vicinity || "",
@@ -52,7 +57,10 @@ export default async function handler(req, res) {
       photoRef: place.photos?.[0]?.photo_reference || null,
     }));
 
-    return res.status(200).json({ results });
+    return res.status(200).json({
+      results,
+      nextPageToken: data.next_page_token || null,
+    });
   } catch (err) {
     console.error("Places API error:", err);
     return res.status(500).json({ error: "Failed to fetch restaurants" });
