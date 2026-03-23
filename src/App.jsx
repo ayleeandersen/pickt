@@ -476,7 +476,7 @@ export default function App() {
   };
 
   // ── API fetchers (call Vercel proxy functions — keys stay server-side) ───────
-  const fetchRestaurants = async (pagetoken = "") => {
+  const fetchRestaurants = async (pagetoken = "", limit = 20) => {
     const loc = await new Promise((res, rej) =>
       navigator.geolocation
         ? navigator.geolocation.getCurrentPosition(
@@ -484,7 +484,7 @@ export default function App() {
             () => rej("Location access denied"))
         : rej("Geolocation not supported")
     );
-    const params = new URLSearchParams({ lat: loc.lat, lng: loc.lng, radius });
+    const params = new URLSearchParams({ lat: loc.lat, lng: loc.lng, radius, limit });
     if (pagetoken) params.set("pagetoken", pagetoken);
     const r = await fetch(`${API_BASE}/api/restaurants?${params}`);
     const d = await r.json();
@@ -501,11 +501,12 @@ export default function App() {
     }));
   };
 
-  const fetchMovies = async (page) => {
+  const fetchMovies = async (page, limit = 20) => {
     const p = page || (Math.ceil(Math.random() * 10));
     const params = new URLSearchParams({
       ratings: ratings.join("|"),
       page: String(p),
+      limit: String(limit),
       ...(platforms.length ? { providers: platforms.join("|") } : {}),
     });
     const r = await fetch(`${API_BASE}/api/movies?${params}`);
@@ -528,9 +529,10 @@ export default function App() {
     moviePageRef.current = 1;
 
     let fetched = [];
+    const countToFetch = itemCount === -1 ? 20 : itemCount;
     try {
-      if (category === "food") fetched = await fetchRestaurants();
-      else if (category === "movies") fetched = await fetchMovies(1);
+      if (category === "food") fetched = await fetchRestaurants("", countToFetch);
+      else if (category === "movies") fetched = await fetchMovies(1, countToFetch);
       // "custom" category: no API fetch — user-supplied items only
     } catch(e) { setLoadErr(e.message); }
 
@@ -588,11 +590,11 @@ export default function App() {
     try {
       if (category === "food") {
         // Pass the stored pagetoken so Google returns the next page of results
-        fetched = await fetchRestaurants(nextPageTokenRef.current);
+        fetched = await fetchRestaurants(nextPageTokenRef.current, 20);
       } else if (category === "movies") {
         // Increment the page cursor so TMDB returns a different set
         moviePageRef.current += 1;
-        fetched = await fetchMovies(moviePageRef.current);
+        fetched = await fetchMovies(moviePageRef.current, 20);
       }
     } catch(e) { setLoadingMore(false); return 0; }
     // Use ref to get truly current options (avoids stale closure)

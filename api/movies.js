@@ -21,6 +21,7 @@ export default async function handler(req, res) {
     ratings = "",       // pipe-separated: "G|PG|PG-13"
     providers = "",     // pipe-separated provider IDs: "8|15|337"
     page = String(Math.ceil(Math.random() * 10)), // random page so each load gives fresh results
+    limit = "20",
   } = req.query;
 
   try {
@@ -52,7 +53,7 @@ export default async function handler(req, res) {
     }
 
     // Shape results — only send what the app needs
-    const results = data.results.slice(0, 20).map(m => ({
+    const results = data.results.slice(0, parseInt(limit)).map(m => ({
       id: `tmdb_${m.id}`,
       name: m.title,
       year: m.release_date?.slice(0, 4) || null,

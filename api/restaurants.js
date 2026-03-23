@@ -12,7 +12,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
-  const { lat, lng, radius = 5000, pagetoken = "" } = req.query;
+  const { lat, lng, radius = 5000, pagetoken = "", limit = "20" } = req.query;
 
   if (!lat || !lng) {
     return res.status(400).json({ error: "lat and lng query params are required" });
@@ -47,7 +47,7 @@ export default async function handler(req, res) {
     }
 
     // Shape the results — only send what the app needs, no raw key exposure
-    const results = data.results.slice(0, 20).map(place => ({
+    const results = data.results.slice(0, parseInt(limit)).map(place => ({
       id: place.place_id,
       name: place.name,
       vicinity: place.vicinity || "",
